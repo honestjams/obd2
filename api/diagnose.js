@@ -1,6 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { createClient } from '@supabase/supabase-js';
 
 const client = new Anthropic();
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 const DIAGNOSIS_SCHEMA = {
   type: 'object',
@@ -94,6 +99,18 @@ Provide a comprehensive diagnosis for this specific vehicle. Include:
     }
 
     const diagnosis = JSON.parse(textBlock.text);
+
+    // Store in Supabase (non-blocking — don't fail the request if storage fails)
+    supabase.from('obd2_diagnoses').insert({
+      year: String(year),
+      make: String(make),
+      model: String(model),
+      code: normalizedCode,
+      result: diagnosis,
+    }).then(({ error }) => {
+      if (error) console.error('Supabase insert error:', error.message);
+    });
+
     return res.status(200).json(diagnosis);
   } catch (error) {
     console.error('Diagnosis error:', error?.message ?? error);
