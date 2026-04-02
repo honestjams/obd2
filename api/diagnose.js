@@ -71,7 +71,6 @@ Make the diagnostic and resolution steps specific and actionable, not generic.`;
     const message = await client.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 2048,
-      thinking: { type: 'adaptive' },
       messages: [{ role: 'user', content: prompt }],
     });
 
