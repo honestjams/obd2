@@ -2,102 +2,107 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic();
 
+const DIAGNOSIS_SCHEMA = {
+  type: 'object',
+  properties: {
+    code: { type: 'string' },
+    description: { type: 'string' },
+    system_affected: { type: 'string' },
+    severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+    common_symptoms: { type: 'array', items: { type: 'string' } },
+    sensors_involved: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          location: { type: 'string' },
+          function: { type: 'string' },
+          likely_faulty: { type: 'boolean' },
+        },
+        required: ['name', 'location', 'function', 'likely_faulty'],
+        additionalProperties: false,
+      },
+    },
+    possible_causes: { type: 'array', items: { type: 'string' } },
+    diagnostic_steps: { type: 'array', items: { type: 'string' } },
+    resolution_steps: { type: 'array', items: { type: 'string' } },
+    estimated_repair_cost: { type: 'string' },
+    diy_difficulty: { type: 'string', enum: ['easy', 'moderate', 'difficult', 'professional_only'] },
+    additional_notes: { type: 'string' },
+  },
+  required: [
+    'code', 'description', 'system_affected', 'severity',
+    'common_symptoms', 'sensors_involved', 'possible_causes',
+    'diagnostic_steps', 'resolution_steps', 'estimated_repair_cost',
+    'diy_difficulty', 'additional_notes',
+  ],
+  additionalProperties: false,
+};
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { year, make, model, code } = req.body;
+  // Vercel auto-parses JSON bodies, but guard against string body just in case
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch {
+      return res.status(400).json({ error: 'Invalid JSON body' });
+    }
+  }
+
+  const { year, make, model, code } = body || {};
 
   if (!year || !make || !model || !code) {
     return res.status(400).json({ error: 'Missing required fields: year, make, model, code' });
   }
 
-  const normalizedCode = code.trim().toUpperCase();
+  const normalizedCode = String(code).trim().toUpperCase();
 
-  const prompt = `You are an expert automotive diagnostic technician and OBD2 specialist with 20+ years of experience working on all makes and models.
+  const prompt = `You are an expert automotive diagnostic technician and OBD2 specialist with 20+ years of experience.
 
 Vehicle: ${year} ${make} ${model}
-OBD2 Diagnostic Trouble Code: ${normalizedCode}
+OBD2 Code: ${normalizedCode}
 
-Analyze this diagnostic trouble code for this specific vehicle and provide comprehensive troubleshooting information tailored to this exact year, make, and model.
-
-Return ONLY a valid JSON object with exactly this structure (no markdown code blocks, no text before or after the JSON):
-{
-  "code": "${normalizedCode}",
-  "description": "Clear, plain-English description of what this code means for a ${year} ${make} ${model}",
-  "system_affected": "The specific vehicle system affected (e.g., Engine Management, Fuel System, Transmission Control, Emissions/EVAP, ABS/Brake System)",
-  "severity": "low",
-  "common_symptoms": [
-    "Symptom drivers would notice 1",
-    "Symptom 2",
-    "Symptom 3"
-  ],
-  "sensors_involved": [
-    {
-      "name": "Full sensor or component name",
-      "location": "Specific location on a ${year} ${make} ${model}",
-      "function": "What this sensor measures or controls",
-      "likely_faulty": true
-    }
-  ],
-  "possible_causes": [
-    "Most likely cause listed first",
-    "Second most likely cause",
-    "Additional possible cause"
-  ],
-  "diagnostic_steps": [
-    "1. Start with the simplest check: ...",
-    "2. Next, inspect ...",
-    "3. Use a multimeter to test ...",
-    "4. Check for ..."
-  ],
-  "resolution_steps": [
-    "1. If [cause]: replace/repair ...",
-    "2. If [cause]: ...",
-    "3. After repairs, clear the code and test drive to confirm fix"
-  ],
-  "estimated_repair_cost": "DIY: $XX-XX parts only | Shop: $XXX-XXX parts + labor",
-  "diy_difficulty": "easy",
-  "additional_notes": "Any ${year} ${make} ${model} specific known issues, technical service bulletins (TSBs), or recalls related to this code"
-}
-
-For severity, use exactly one of: "low", "medium", "high", "critical"
-For diy_difficulty, use exactly one of: "easy", "moderate", "difficult", "professional_only"
-Provide at least 3 sensors_involved entries when applicable. If only 1-2 sensors are involved, include related components.
-Make the diagnostic and resolution steps specific and actionable, not generic.`;
+Provide a comprehensive diagnosis for this specific vehicle. Include:
+- What the code means for a ${year} ${make} ${model}
+- Which sensors and components are involved, and their exact location on this vehicle
+- Likely causes in order of probability
+- Step-by-step diagnostic procedure
+- How to fix it
+- Estimated cost (DIY parts vs shop labor)
+- Any known issues, TSBs, or recalls for this year/make/model related to this code`;
 
   try {
     const message = await client.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 2048,
       messages: [{ role: 'user', content: prompt }],
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: DIAGNOSIS_SCHEMA,
+        },
+      },
     });
 
-    const textBlock = message.content.find(block => block.type === 'text');
+    const textBlock = message.content.find(b => b.type === 'text');
     if (!textBlock || textBlock.type !== 'text') {
-      throw new Error('No text content in response');
+      return res.status(500).json({ error: 'No response from AI. Please try again.' });
     }
 
-    const raw = textBlock.text.trim();
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('No JSON object found in response');
-    }
-
-    const diagnosis = JSON.parse(jsonMatch[0]);
+    const diagnosis = JSON.parse(textBlock.text);
     return res.status(200).json(diagnosis);
   } catch (error) {
-    console.error('Diagnosis error:', error);
+    console.error('Diagnosis error:', error?.message ?? error);
 
     if (error instanceof Anthropic.AuthenticationError) {
       return res.status(500).json({ error: 'API authentication failed. Check your ANTHROPIC_API_KEY.' });
     }
     if (error instanceof Anthropic.RateLimitError) {
       return res.status(429).json({ error: 'Rate limit reached. Please wait a moment and try again.' });
-    }
-    if (error instanceof SyntaxError) {
-      return res.status(500).json({ error: 'Failed to parse diagnosis response. Please try again.' });
     }
 
     return res.status(500).json({ error: 'Failed to get diagnosis. Please try again.' });
